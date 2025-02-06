@@ -1,0 +1,8 @@
+# Ignore everything inside a specific directory
+__pycache__/
+logs/
+submissions/
+Run3_2022/
+Run3_202EE/
+Run3_2023/
+Run3_2023BPix/
