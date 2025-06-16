@@ -1,6 +1,6 @@
 # Ignore everything inside a specific directory
 __pycache__/
-logs/
+logs/Run*/
 submissions/
 Run3_2022/
 Run3_2022EE/
