@@ -10,6 +10,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 import scipy
 import copy
 from scipy import interpolate
+from scipy.ndimage import gaussian_filter1d
 
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import Matern, ConstantKernel
@@ -18,20 +19,27 @@ import ROOT
 ROOT.gROOT.SetBatch(True)
 ROOT.TH1.SetDefaultSumw2()
 
-sys.path.insert(0, 'Common/python')
+# Add the path to the Common/python directory
+script_dir = os.path.dirname(os.path.abspath(__file__))
+common_python_dir = os.path.join(os.path.dirname(script_dir), 'Common', 'python')
+sys.path.insert(0, common_python_dir)
+
 from RootObjects import Histogram, Graph
+
+from array import array
 
 # --------------
 # Example Command:
-# python3 fitTurnOn_multi.py --input TurnOn.root --output fitTurnOn
+# pip install sklearn on lxplus
+# python3 scripts/fitTurnOn_multi.py --input TurnOn_mutau.root --output fitTurnOnDeepTau --channels mutau --decay-modes all,0,1,10,11
 # --------------
-
 
 parser = argparse.ArgumentParser(description='Fit turn-on curves.')
 parser.add_argument('--input', required=True, type=str, help="ROOT file with turn-on curves")
 parser.add_argument('--output', required=True, type=str, help="output file prefix")
 parser.add_argument('--channels', required=False, type=str, default='etau,mutau,ditau,ditaujet', help="channels to process")
-parser.add_argument('--decay-modes', required=False, type=str, default='all,0,1,2,10,11', help="decay modes to process")
+parser.add_argument('--decay-modes', required=False, type=str, default='all,0,1,10,11', help="decay modes to process")
+#parser.add_argument('--decay_modes', required=True, type=str, default='DeepTau', choices=['DeepTau', 'PNet'], help="Type of decay modes to process")
 parser.add_argument('--working-points', required=False, type=str,
                     default='VVVLoose,VVLoose,VLoose,Loose,Medium,Tight,VTight,VVTight',
                     help="working points to process")
@@ -46,7 +54,9 @@ class FitResults:
         kernel_high = ConstantKernel()
         kernel_low = ConstantKernel() * Matern(nu=1, length_scale_bounds=(10, 100), length_scale=20)
         N = eff.x.shape[0]
-        res = scipy.optimize.minimize(MinTarget, np.zeros(N), args=(eff,), bounds = [ [0, 1] ] * N,
+        dy_init = np.gradient(eff.y, eff.x)
+        dy_init = np.clip(dy_init, 0, 1)
+        res = scipy.optimize.minimize(MinTarget, dy_init, args=(eff,), bounds = [ [0, 1] ] * N,
                                       options={"maxfun": int(1e6)})
         if not res.success:
             print(res)
@@ -62,6 +72,7 @@ class FitResults:
 
         self.pt_start_flat = eff.x[-1]
         best_chi2_ndof = math.inf
+
         for n in range(1, N):
             flat_eff, residuals, _, _, _ = np.polyfit(eff.x[N-n-1:], eff.y[N-n-1:], 0, w=1/yerr[N-n-1:], full=True)
             chi2_ndof = residuals[0] / n
@@ -82,21 +93,38 @@ class FitResults:
                                                n_restarts_optimizer=10)
         self.gp_low.fit(np.atleast_2d(np.append([10], eff.x[low_pt])).T, np.append([0], eff.y[low_pt]))
 
-        self.y_pred, sigma_pred = self.Predict(x_pred)
+        # Start of plateau uncertainty from GP
+        pt0 = self.pt_start_flat
+        _, sigma_high = self.gp_high.predict(np.atleast_2d(pt0).T, return_std=True)
+        sigma_high = float(sigma_high)
+        self._sigma_plateau = sigma_high
 
+        y_raw, sigma_raw = self.Predict(x_pred)
+        # enforce monotonicity: no negative slopes
+        y_pred = np.maximum.accumulate(y_raw)
+        # inflation uncertainty
+        delta = np.abs(y_pred - y_raw)
+        sigma_inflated = np.sqrt(sigma_raw**2 + delta**2)
+
+        self.y_pred = y_pred
+        self.sigma_pred = sigma_inflated
+
+        plateau_mask = x_pred >= self.pt_start_flat
+        if np.any(plateau_mask):
+            self.sigma_pred[plateau_mask] = self._sigma_plateau
         sigma_orig = np.zeros(N)
         for n in range(N):
             idx = np.argmin(abs(x_pred - eff.x[n]))
-            sigma_orig[n] = sigma_pred[idx]
+            sigma_orig[n] = self.sigma_pred[idx]
 
         interp_kind = 'linear'
         sp = interpolate.interp1d(eff.x, sigma_orig, kind=interp_kind, fill_value="extrapolate")
         sigma_interp = sp(x_pred)
         max_unc = 0.05 / math.sqrt(2)
-        sigma_pred, = self.ApplyStep(x_pred, [ [ sigma_pred, sigma_interp ] ], eff.x[0], eff.x[-1] )
+        sigma_step_smoothed, = self.ApplyStep(x_pred, [ [ self.sigma_pred, sigma_interp ] ], eff.x[0], eff.x[-1] )
         outer_trend = np.minimum(np.ones(x_pred.shape[0]), (x_pred - eff.x[-1]) / eff.x[-1])
-        outer_sigma = np.maximum(sigma_pred, sigma_pred + (max_unc - sigma_pred) * outer_trend )
-        self.sigma_pred = np.where(x_pred < eff.x[-1], sigma_pred, outer_sigma )
+        outer_sigma = np.maximum(sigma_step_smoothed, sigma_step_smoothed + (max_unc - sigma_step_smoothed) * outer_trend )
+        self.sigma_pred = np.where(x_pred < eff.x[-1], sigma_step_smoothed, outer_sigma )
 
     def Predict(self, x_pred):
         y_pred_high, sigma_high = self.gp_high.predict(np.atleast_2d(x_pred).T, return_std=True)
@@ -120,29 +148,92 @@ working_points = args.working_points.split(',')
 ch_validity_thrs = { 'etau': 35, 'mutau': 32, 'ditau': 40, 'ditaujet': 40, }
 
 file = ROOT.TFile(args.input, 'READ')
-output_file = ROOT.TFile('{}.root'.format(args.output), 'RECREATE', '', ROOT.RCompressionSetting.EDefaults.kUseSmallest)
+output_dir = os.path.join(os.getcwd(), args.output)
+os.makedirs(output_dir, exist_ok=True)
+
+output_file_path = os.path.join(output_dir, 'fitTurnOnDeepTau')
+print('Output file will be saved to {}'.format(output_file_path))
+output_file = ROOT.TFile('{}.root'.format(output_file_path), 'RECREATE', '', ROOT.RCompressionSetting.EDefaults.kUseSmallest)
 
 for channel in channels:
-    with PdfPages('{}_{}.pdf'.format(args.output, channel)) as pdf:
+    with PdfPages('{}_{}.pdf'.format(output_file_path, channel)) as pdf:
         for wp in working_points:
             for dm in decay_modes:
                 print('Processing {} {} WP DM = {}'.format(channel, wp, dm))
                 dm_label = '_dm{}'.format(dm) if dm != 'all' else ''
                 name_pattern = '{{}}_{}_{}{}_fit_eff'.format(channel, wp, dm_label)
-                dm_label = '_dm'+ dm if len(dm) > 0 else ''
+                
                 eff_data_root = file.Get(name_pattern.format('data'))
                 eff_mc_root = file.Get(name_pattern.format('mc'))
-                eff_data = Graph(root_graph=eff_data_root)
-                eff_mc = Graph(root_graph=eff_mc_root)
+                
+                # Check if objects exist
+                if not eff_data_root:
+                    print(f"Warning: Could not find data efficiency for {name_pattern.format('data')}")
+                    continue
+                if not eff_mc_root:
+                    print(f"Warning: Could not find MC efficiency for {name_pattern.format('mc')}")
+                    continue
+                
+                eff_data_orig = Graph(root_graph=eff_data_root)
+                eff_mc_orig = Graph(root_graph=eff_mc_root)
                 pred_step = 0.1
                 #x_low = min(eff_data.x[0] - eff_data.x_error_low[0], eff_mc.x[0] - eff_mc.x_error_low[0])
                 #x_high = max(eff_data.x[-1] + eff_data.x_error_high[-1], eff_mc.x[-1] + eff_mc.x_error_high[-1])
                 x_low, x_high = 20, 1000
                 x_pred = np.arange(x_low, x_high + pred_step / 2, pred_step)
 
+                def rebin_mc_to_data(data_graph, mc_graph):
+                    xs, ys, xl, xh, yl, yh = [], [], [], [], [], []
+
+                    # Loop one-to-one over data bins:
+                    for i, (center, exl, exh) in enumerate(zip(data_graph.x,
+                                                data_graph.x_error_low,
+                                                data_graph.x_error_high)):
+                        lo, hi = center - exl, center + exh
+                        eps = 1e-6
+
+                         # pick MC bins whose intervals overlap [lo, hi)
+                        left_edges  = mc_graph.x - mc_graph.x_error_low
+                        right_edges = mc_graph.x + mc_graph.x_error_high
+                        mask = (left_edges < hi + eps) & (right_edges > lo - eps)
+
+                        if np.any(mask):
+                            # Weighted average of MC eff in [lo, hi]
+                            y_vals   = mc_graph.y[mask]
+                            errs_low = mc_graph.y_error_low[mask]
+                            errs_hi  = mc_graph.y_error_high[mask]
+                            weights  = 1.0 / ((errs_low + errs_hi) / 2.0)**2
+
+                            y_mean = np.average(y_vals, weights=weights)
+                            y_err  = np.sqrt(1.0 / weights.sum())
+                        else:
+                            print(f"Warning: no MC points in data bin [{lo}, {hi})")
+                            y_mean, y_err = np.nan, np.nan
+
+                        # Append exactly the data bin center & widths
+                        xs.append(center)
+                        ys.append(y_mean)
+                        xl.append(exl)
+                        xh.append(exh)
+                        yl.append(y_err)
+                        yh.append(y_err)
+
+                    # Build the TGraphAsymmErrors from these arrays
+                    tga_mc = ROOT.TGraphAsymmErrors(
+                        len(xs),
+                        array('d', xs), array('d', ys),
+                        array('d', xl), array('d', xh),
+                        array('d', yl), array('d', yh),
+                    )
+                    mc_rebinned = Graph(root_graph=tga_mc)
+
+                    return data_graph, mc_rebinned
+
+                eff_data, eff_mc = rebin_mc_to_data(eff_data_orig, eff_mc_orig)
+
                 eff_data_fitted = FitResults(eff_data, x_pred)
                 eff_mc_fitted = FitResults(eff_mc, x_pred)
-
+                    
                 sf = eff_data_fitted.y_pred / eff_mc_fitted.y_pred
                 sf_sigma = np.sqrt( (eff_data_fitted.sigma_pred / eff_mc_fitted.y_pred) ** 2 \
                          + (eff_data_fitted.y_pred / (eff_mc_fitted.y_pred ** 2) * eff_mc_fitted.sigma_pred ) ** 2 )
@@ -153,32 +244,6 @@ for channel in channels:
                 data_color = 'k'
                 trans = 0.3
 
-                # test by botao
-                # print("mc low previous: {}".format(eff_mc.x_error_low))
-                # print("data low previous: {}".format(eff_data.x_error_low))
-                # count = 0
-                # for _i,_obj in enumerate(eff_data.x_error_low) :
-                #     if _obj < 0:
-                #         _obj == abs(_obj)
-                # for _i,_obj in enumerate(eff_data.x_error_high) :
-                #     if _obj < 0:
-                #         _obj == - _obj
-                # count = 0
-                # for _i,_obj in enumerate(eff_mc.x_error_low) :
-                #     if _obj < 0:
-                #         print("BUGBUGBUGBUG!")
-                #         count = 1
-                #         _obj == abs(_obj)
-                # if count == 1:
-                #     continue
-                # for _i,_obj in enumerate(eff_mc.x_error_high) :
-                #     if _obj < 0:
-                #         _obj == - _obj
-                # print("mc low: {}".format(eff_mc.x_error_low))
-                # print("mc high: {}".format(eff_mc.x_error_high))
-                # print("data low: {}".format(eff_data.x_error_low))
-                # print("data high: {}".format(eff_data.x_error_high))
-                # end test
                 plt_data = ax.errorbar(eff_data.x, eff_data.y, xerr=(abs(eff_data.x_error_low), abs(eff_data.x_error_high)),
                                        yerr=(eff_data.y_error_low, eff_data.y_error_high), fmt=data_color+'.',
                                        markersize=5)
@@ -221,7 +286,6 @@ for channel in channels:
 
                 ax.legend([ plt_data, plt_mc, plt_data_fitted[0], plt_mc_fitted[0], validity_plt[0] ],
                           [ "Data", "MC", "Data fitted", "MC fitted", "Validity range"], fontsize=12, loc='lower right')
-
 
                 plt.subplots_adjust(hspace=0)
                 pdf.savefig(bbox_inches='tight')
