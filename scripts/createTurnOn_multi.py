@@ -20,13 +20,15 @@ parser.add_argument('--input-dy-mc', required=True, type=str, help="skimmed DY M
 parser.add_argument('--output', required=True, type=str, help="output file prefix")
 parser.add_argument('--channels', required=False, type=str, default='etau,mutau,ditau,ditaujet', help="channels to process")
 # parser.add_argument('--channels', required=False, type=str, default='ditau,ditau_withptiso_nobitcut,ditau_withptiso_bit1,ditau_withptiso_bit1_bit17,ditau_withptiso_bit1_bit17_0bit18', help="channels to process")
-parser.add_argument('--decay-modes', required=False, type=str, default='all,0,1,2,10,11', help="decay modes to process")
+parser.add_argument('--decay-modes', required=False, type=str, default='all,0,1,10,11', help="decay modes to process")
 parser.add_argument('--working-points', required=False, type=str,
                     default='VVVLoose,VVLoose,VLoose,Loose,Medium,Tight,VTight,VVTight',
                     help="working points to process")
 args = parser.parse_args()
-
-sys.path.insert(0, 'Common/python')
+# Add the path to the Common/python directory
+script_dir = os.path.dirname(os.path.abspath(__file__))
+common_python_dir = os.path.join(os.path.dirname(script_dir), 'Common', 'python')
+sys.path.insert(0, common_python_dir)
 from AnalysisTypes import *
 from AnalysisTools import *
 import RootPlotting
@@ -73,67 +75,69 @@ class TurnOnData:
 
 def CreateHistograms(input_file, channels, decay_modes, discr_name, working_points, hist_models, label, var,
                      output_file):
-    df = ROOT.RDataFrame('Events', input_file)
+    df = ROOT.RDataFrame('tree', input_file)
     turnOn_data = {}
     dm_labels = {}
 
-#    for dm in decay_modes:
-#        if dm == 'all':
-#            dm_labels[dm] = ''
-#            df_dm = df
-#        elif dm == '0':
-#            dm_labels[dm] = '_dm{}'.format(dm)
-#            df_dm = df.Filter('tau_decayModePNet == 0 && tau_ipLengthSig >= 1.25')
-#        elif dm == '1':
-#            dm_labels[dm] = '_dm{}'.format(dm)
-#            df_dm = df.Filter('tau_decayModePNet == 1 && tau_decayMode == 1')
-#        elif dm == '2':
-#            dm_labels[dm] = '_dm{}'.format(dm)
-#            df_dm = df.Filter('tau_decayModePNet == 2 && tau_decayMode == 1')
-#        elif dm == '10':
-#            dm_labels[dm] = '_dm{}'.format(dm)
-#            df_dm = df.Filter('tau_decayModePNet == 10')
-#        elif dm == '11':
-#            dm_labels[dm] = '_dm{}'.format(dm)
-#            df_dm = df.Filter('tau_decayModePNet == 11')
     for dm in decay_modes:
         if dm == 'all':
             dm_labels[dm] = ''
             df_dm = df
-        elif dm == '1011':
-            dm_labels[dm] = '_dm{}'.format(dm)
-            df_dm = df.Filter('tau_decayModePNet == 10 | tau_decayModePNet == 11')
-
-        elif dm == '0':
-            dm_labels[dm] = '_dm{}'.format(dm)
-            df_dm = df.Filter('tau_decayModePNet == {} && abs(tau_ipLengthSig) >= 1.25'.format(dm))
-        elif dm == '1':
-            dm_labels[dm] = '_dm{}'.format(dm)
-            df_dm = df.Filter('tau_decayModePNet == {} && tau_decayMode == 1'.format(dm))
-        elif dm == '2':
-            dm_labels[dm] = '_dm{}'.format(dm)
-            df_dm = df.Filter('tau_decayModePNet == {} && tau_decayMode == 1'.format(dm))
-        elif dm == '10' or dm == '11':
-            dm_labels[dm] = '_dm{}'.format(dm)
-            df_dm = df.Filter('tau_decayModePNet == {} && tau_hasRefitSV ==1'.format(dm))
+        elif dm == '1011':  # group DM 10 and 11
+            dm_labels[dm] = '_dm1011'
+            df_dm = df.Filter('dm_2 == 10 || dm_2 == 11')
         else:
-            dm_labels[dm] = '_dm{}'.format(dm)
-            df_dm = df.Filter('tau_decayModePNet == {}'.format(dm))
+            dm_labels[dm] = f'_dm{dm}'
+            df_dm = df.Filter(f'dm_2 == {dm}')
+        
         turnOn_data[dm] = {}
+
         for wp in working_points:
             wp_bit = ParseEnum(DiscriminatorWP, wp)
             # df_wp = df_dm.Filter('({} & (1 << {})) != 0'.format(discr_name, wp_bit))
             df_wp = df_dm.Filter('{0} >= {1}'.format(discr_name, wp_bit))
             turnOn_data[dm][wp] = {}
             for channel in channels:
-                turnOn_data[dm][wp][channel] = {}
-                df_ch = df_wp.Filter('pass_{} > 0.5'.format(channel))
+                turnOn_data[dm][wp][channel] = {}      
+                # Define weight and base selection based on data vs MC
+                column_names = [str(c) for c in df.GetColumnNames()]
+                has_weight = 'weight' in column_names
+                
+                if label == 'data':
+                    # For data: apply SS subtraction
+                    if has_weight:
+                        df_weighted = df_wp.Define('event_weight', '(q_1 != q_2 ? 1.0 : -1.0) * weight')
+                    else:
+                        df_weighted = df_wp.Define('event_weight', 'q_1 != q_2 ? 1.0 : -1.0')
+                    df_base = df_weighted.Filter(
+                        "pass_probe && HLT_IsoMu24 && Flag_METFilters && abs(eta_2) < 2.1 && trig_match_single_muon")
+                else: 
+                    # For MC: only opposite sign events, use PU weight if available
+                    if has_weight:
+                        df_weighted = df_wp.Define('event_weight', 'weight')
+                    else:
+                        df_weighted = df_wp.Define('event_weight', '1.0')
+                    df_base = df_weighted.Filter("pass_probe && HLT_IsoMu24 && Flag_METFilters && abs(eta_2) < 2.1 && trig_match_single_muon && q_1 != q_2")
+                
+                # Channel-specific trigger selections
+                if channel == 'mutau':
+                    df_ch = df_base.Filter("HLT_IsoMu20_eta2p1_LooseDeepTauPFTauHPS27_eta2p1_CrossL1 && trig_match_DeepTau_MuTau")
+                elif channel == 'etau':
+                    df_ch = df_base.Filter("HLT_IsoMu20_eta2p1_LooseDeepTauPFTauHPS27_eta2p1_CrossL1 && trig_match_DeepTau_ETau")
+                elif channel == 'ditau':
+                    df_ch = df_base.Filter("HLT_IsoMu20_eta2p1_LooseDeepTauPFTauHPS27_eta2p1_CrossL1 && trig_match_DeepTau_DiTau")
+                elif channel == 'ditaujet':
+                    df_ch = df_base.Filter("HLT_IsoMu24_eta2p1_MediumDeepTauPFTauHPS35_L2NN_eta2p1_CrossL1 && trig_match_DeepTau_DiTauJet")
+                else:
+                    raise RuntimeError(f"Unsupported channel: {channel}")
+                
                 for model_name, hist_model in hist_models.items():
                     turn_on = TurnOnData()
-                    turn_on.hist_total = df_wp.Histo1D(hist_model, var, 'weight')
-                    turn_on.hist_passed = df_ch.Histo1D(hist_model, var, 'weight')
+                    turn_on.hist_total = df_base.Histo1D(hist_model, var, 'event_weight')
+                    turn_on.hist_passed = df_ch.Histo1D(hist_model, var, 'event_weight')
                     turnOn_data[dm][wp][channel][model_name] = turn_on
 
+    # Create efficiency histograms and save to file
     for dm in decay_modes:
         for wp in working_points:
             for channel in channels:
@@ -141,13 +145,14 @@ def CreateHistograms(input_file, channels, decay_modes, discr_name, working_poin
                     turn_on = turnOn_data[dm][wp][channel][model_name]
                     name_pattern = '{}_{}_{}{}_{}_{{}}'.format(label, channel, wp, dm_labels[dm], model_name)
                     turn_on.name_pattern = name_pattern
+                    
                     if 'fit' in model_name:
                         passed, total, eff = AutoRebinAndEfficiency(turn_on.hist_passed.GetPtr(),
                                                                     turn_on.hist_total.GetPtr(), bin_scan_pairs)
                     else:
                         passed, total = turn_on.hist_passed.GetPtr(), turn_on.hist_total.GetPtr()
                         # # new add by botao
-                        # if (passed.Integral() < 0) or (total.Integral() < 0):
+                        # if (passed.Integral() <= 0) or (total.Integral() <= 0):
                         #     continue
                         # # end add
                         try:
@@ -172,14 +177,14 @@ def CreateHistograms(input_file, channels, decay_modes, discr_name, working_poin
 
     return turnOn_data
 
-output_dir =  os.path.dirname(args.output)
+output_dir = os.path.dirname(args.output)
 os.makedirs(output_dir, exist_ok=True)
 
 output_file = ROOT.TFile(args.output + '.root', 'RECREATE')
 input_files = [ args.input_data, args.input_dy_mc ]
 n_inputs = len(input_files)
 labels = [ 'data', 'mc' ]
-var = 'tau_pt'
+var = 'pt_2'
 title, x_title = '#tau p_{T}', '#tau p_{T} (GeV)'
 decay_modes = args.decay_modes.split(',')
 channels = args.channels.split(',')
@@ -190,10 +195,11 @@ hist_models = {
     'plot': ROOT.RDF.TH1DModel(var, var, len(bins) - 1, array('d', bins)),
     'fit': ROOT.RDF.TH1DModel(var, var, len(bins_fit) - 1, array('d', bins_fit))
 }
+
 turnOn_data = [None] * n_inputs
 for input_id in range(n_inputs):
     print("Creating {} histograms...".format(labels[input_id]))
-    turnOn_data[input_id] = CreateHistograms(input_files[input_id], channels, decay_modes, 'tau_idDeepTau2018v2p5VSjet', # tau_idDeepTau2017v2p1VSjet,
+    turnOn_data[input_id] = CreateHistograms(input_files[input_id], channels, decay_modes, 'idDeepTau2018v2p5VSjet_2', # tau_idDeepTau2017v2p1VSjet,
                                              working_points, hist_models, labels[input_id], var, output_file)
 
 colors = [ ROOT.kRed, ROOT.kBlack ]
@@ -221,13 +227,15 @@ for channel in channels:
             y_min, y_max = (0, 1)
             y_title = 'Efficiency'
             title = '{} {}{}'.format(channel, wp, dm_label)
-            plain_title = '{}_{}{}'.format(channel, wp, dm_plain_label)
+            plain_title = '{}_{}{}'.format(channel, wp, dm_plain_label)  
             main_pad, ratio_pad, title_controls = RootPlotting.CreateTwoPadLayout(canvas, ref_hist, ratio_ref_hist,
                                                                                   log_x=use_logx, title=title)
             RootPlotting.ApplyAxisSetup(ref_hist, ratio_ref_hist, x_title=x_title, y_title=y_title,
                                         ratio_y_title='Ratio', y_range=(y_min, y_max * 1.1), max_ratio=1.5)
-            legend = RootPlotting.CreateLegend(pos=(0.78, 0.28), size=(0.2, 0.15))
+            legend = RootPlotting.CreateLegend(pos=(0.78, 0.28), size=(0.2, 0.15)) 
             for input_id in range(n_inputs):
+                if curves[input_id] is None:
+                    continue
                 curve = curves[input_id]
                 try:
                     curve.Draw('SAME')
@@ -236,7 +244,7 @@ for channel in channels:
                 RootPlotting.ApplyDefaultLineStyle(curve, colors[input_id])
                 legend.AddEntry(curve, labels[input_id], 'PLE')
 
-                if input_id < n_inputs - 1:
+                if input_id < n_inputs - 1 and turnOns[input_id] is not None and turnOns[-1] is not None:
                     ratio_graph = RootPlotting.CreateEfficiencyRatioGraph(turnOns[input_id].hist_passed,
                                                                           turnOns[input_id].hist_total,
                                                                           turnOns[-1].hist_passed,
@@ -248,13 +256,14 @@ for channel in channels:
                         RootPlotting.ApplyDefaultLineStyle(ratio_graph, ratio_color)
                         ratio_graph.Draw("0PE SAME")
                         main_pad.cd()
+            
             legend.Draw()
-
             canvas.Update()
             output_file.WriteTObject(canvas, 'canvas_{}'.format(plain_title), 'Overwrite')
             RootPlotting.PrintAndClear(canvas, args.output + '.pdf', plain_title, plot_id, n_plots,
                                        [ main_pad, ratio_pad ])
             plot_id += 1
+
 output_file.Close()
 print("Success")
 os._exit(0)
