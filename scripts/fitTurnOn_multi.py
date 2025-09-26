@@ -37,7 +37,7 @@ from array import array
 parser = argparse.ArgumentParser(description='Fit turn-on curves.')
 parser.add_argument('--input', required=True, type=str, help="ROOT file with turn-on curves")
 parser.add_argument('--output', required=True, type=str, help="output file prefix")
-parser.add_argument('--channels', required=False, type=str, default='etau,mutau,ditau,ditaujet', help="channels to process")
+parser.add_argument('--channels', required=False, type=str, default='etau,mutau, singletau, ditau,ditaujet,ditaujet_jet_leg, vbftau, vbfditau ', help="channels to process")
 parser.add_argument('--decay-modes', required=False, type=str, default='all,0,1,10,11', help="decay modes to process")
 #parser.add_argument('--decay_modes', required=True, type=str, default='DeepTau', choices=['DeepTau', 'PNet'], help="Type of decay modes to process")
 parser.add_argument('--working-points', required=False, type=str,
@@ -145,7 +145,7 @@ class FitResults:
 channels = args.channels.split(',')
 decay_modes = args.decay_modes.split(',')
 working_points = args.working_points.split(',')
-ch_validity_thrs = { 'etau': 35, 'mutau': 32, 'ditau': 40, 'ditaujet': 40, }
+ch_validity_thrs = { 'etau': 35, 'mutau': 32, 'singletau' : 190, 'ditau': 40, 'ditaujet': 35, 'vbftau': 50, 'vbfditau': 25 }
 
 file = ROOT.TFile(args.input, 'READ')
 output_dir = os.path.join(os.getcwd(), args.output)
