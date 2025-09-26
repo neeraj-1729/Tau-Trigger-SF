@@ -18,7 +18,7 @@ parser = argparse.ArgumentParser(description='Create turn on curves.')
 parser.add_argument('--input-data', required=True, type=str, help="skimmed data input")
 parser.add_argument('--input-dy-mc', required=True, type=str, help="skimmed DY MC input")
 parser.add_argument('--output', required=True, type=str, help="output file prefix")
-parser.add_argument('--channels', required=False, type=str, default='etau,mutau,ditau,ditaujet', help="channels to process")
+parser.add_argument('--channels', required=False, type=str, default='etau,mutau, singletau, ditau,ditaujet,ditaujet_jet_leg, vbftau, vbfditau ', help="channels to process")
 # parser.add_argument('--channels', required=False, type=str, default='ditau,ditau_withptiso_nobitcut,ditau_withptiso_bit1,ditau_withptiso_bit1_bit17,ditau_withptiso_bit1_bit17_0bit18', help="channels to process")
 parser.add_argument('--decay-modes', required=False, type=str, default='all,0,1,10,11', help="decay modes to process")
 parser.add_argument('--working-points', required=False, type=str,
@@ -122,12 +122,21 @@ def CreateHistograms(input_file, channels, decay_modes, discr_name, working_poin
                 # Channel-specific trigger selections
                 if channel == 'mutau':
                     df_ch = df_base.Filter("HLT_IsoMu20_eta2p1_LooseDeepTauPFTauHPS27_eta2p1_CrossL1 && trig_match_DeepTau_MuTau")
+                elif channel == 'singletau':
+                    df_ch = df_base.Filter("HLT_IsoMu24_eta2p1_LooseDeepTauPFTauHPS180_eta2p1 && trig_match_DeepTau_SingleTau")
                 elif channel == 'etau':
                     df_ch = df_base.Filter("HLT_IsoMu20_eta2p1_LooseDeepTauPFTauHPS27_eta2p1_CrossL1 && trig_match_DeepTau_ETau")
                 elif channel == 'ditau':
-                    df_ch = df_base.Filter("HLT_IsoMu20_eta2p1_LooseDeepTauPFTauHPS27_eta2p1_CrossL1 && trig_match_DeepTau_DiTau")
+                    df_ch = df_base.Filter("HLT_IsoMu24_eta2p1_MediumDeepTauPFTauHPS35_L2NN_eta2p1_CrossL1 && trig_match_DeepTau_DiTau")
                 elif channel == 'ditaujet':
-                    df_ch = df_base.Filter("HLT_IsoMu24_eta2p1_MediumDeepTauPFTauHPS35_L2NN_eta2p1_CrossL1 && trig_match_DeepTau_DiTauJet")
+                    df_ch = df_base.Filter("HLT_IsoMu24_eta2p1_MediumDeepTauPFTauHPS30_L2NN_eta2p1_CrossL1 && trig_match_DeepTau_DiTauJet")
+                elif channel == 'ditaujet_jet_leg':
+                    df_ch = df_base.Filter("HLT_IsoMu24_eta2p1_MediumDeepTauPFTauHPS30_L2NN_eta2p1_PFJet60_CrossL1 && trig_match_DeepTau_DiTauJet && jet_pt_cut")
+                elif channel == 'vbftau':
+                    df_ch = df_base.Filter("HLT_IsoMu24_eta2p1_MediumDeepTauPFTauHPS45_L2NN_eta2p1_CrossL1 && trig_match_DeepTau_VBFSingleTau")
+                elif channel == 'vbfditau':
+                    df_ch = df_base.Filter("HLT_IsoMu24_eta2p1_MediumDeepTauPFTauHPS20_eta2p1_SingleL1 && trig_match_DeepTau_VBFDiTau")
+                
                 else:
                     raise RuntimeError(f"Unsupported channel: {channel}")
                 
@@ -202,7 +211,7 @@ for input_id in range(n_inputs):
     turnOn_data[input_id] = CreateHistograms(input_files[input_id], channels, decay_modes, 'idDeepTau2018v2p5VSjet_2', # tau_idDeepTau2017v2p1VSjet,
                                              working_points, hist_models, labels[input_id], var, output_file)
 
-colors = [ ROOT.kRed, ROOT.kBlack ]
+colors = [ ROOT.kBlack, ROOT.kRed ] # Data, MC
 canvas = RootPlotting.CreateCanvas()
 
 n_plots = len(decay_modes) * len(channels) * len(working_points)
